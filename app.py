@@ -36,10 +36,9 @@ def get_csv_url(url):
         return None
 
 # --- 3. Data Input Selection ---
-# Let the user choose how they want to provide the data
 input_method = st.radio("How would you like to provide the data?", ["Paste Google Sheet Link", "Upload a File"])
 
-df = None # This will hold our data regardless of how it's loaded
+df = None 
 
 if input_method == "Upload a File":
     uploaded_file = st.file_uploader("Upload Master Data (CSV or Excel)", type=['csv', 'xlsx'])
@@ -60,15 +59,13 @@ elif input_method == "Paste Google Sheet Link":
         csv_url = get_csv_url(sheet_url)
         if csv_url:
             try:
-                # Pandas can read directly from a CSV URL!
                 df = pd.read_csv(csv_url)
             except Exception as e:
-                st.error(f"Could not read the Google Sheet. Please double-check the link and ensure sharing is set to 'Anyone with the link'. (Error: {e})")
+                st.error(f"Could not read the Google Sheet. (Error: {e})")
         else:
             st.error("Invalid Google Sheets URL. Please paste the full link.")
 
 # --- 4. Processing the Data ---
-# If we successfully loaded the dataframe (df) from either method, proceed:
 if df is not None:
     # Validation
     missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
@@ -87,8 +84,8 @@ if df is not None:
         
         if st.button("Process Data & Create Folder"):
             with st.spinner('Generating files and zipping folder...'):
-                # Filter data
-                filtered_df = df[df['Category'] == selected_category]
+                # Filter data for the Whole Category sheet (keeps original comma-separated sellers)
+                filtered_df = df[df['Category'] == selected_category].copy()
                 
                 # Get today's date formatted as DD-MM
                 current_date = datetime.now().strftime("%d-%m")
@@ -102,18 +99,33 @@ if df is not None:
                 
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                     
-                    # 1. Create and write the "Whole Category" sheet
+                    # 1. Create and write the "Whole Category" sheet FIRST (un-exploded)
                     cat_file_name = f"{safe_category} Replenishment {current_date}.xlsx"
                     cat_buffer = io.BytesIO() 
                     
                     filtered_df[OUTPUT_COLS_ALL].to_excel(cat_buffer, index=False)
                     zip_file.writestr(f"{folder_name}/{cat_file_name}", cat_buffer.getvalue())
                     
-                    # 2. Loop through sellers and create their individual sheets
-                    unique_sellers = filtered_df['Sellers'].dropna().unique()
+                    # 2. EXPLODE the sellers for individual sheets
+                    # We copy the dataframe, split the strings by comma, and explode it into new rows
+                    exploded_df = filtered_df.copy()
+                    
+                    # Convert to string to avoid errors, split by comma, then explode
+                    exploded_df['Sellers'] = exploded_df['Sellers'].astype(str).str.split(',')
+                    exploded_df = exploded_df.explode('Sellers')
+                    
+                    # Strip out any extra blank spaces (e.g., "Seller A, Seller B" -> " Seller B" becomes "Seller B")
+                    exploded_df['Sellers'] = exploded_df['Sellers'].str.strip()
+                    
+                    # Loop through our newly separated unique sellers
+                    unique_sellers = exploded_df['Sellers'].dropna().unique()
                     
                     for seller in unique_sellers:
-                        seller_df = filtered_df[filtered_df['Sellers'] == seller]
+                        # Ignore rows where the seller might be 'nan' or empty after splitting
+                        if seller.lower() == 'nan' or seller == "":
+                            continue
+                            
+                        seller_df = exploded_df[exploded_df['Sellers'] == seller]
                         safe_seller = clean_filename(seller)
                         
                         seller_file_name = f"{safe_seller} replenishment_{current_date}.xlsx"
