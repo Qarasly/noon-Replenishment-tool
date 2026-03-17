@@ -6,18 +6,18 @@ from datetime import datetime
 import re
 
 # --- 1. App UI Setup ---
-st.set_page_config(page_title="Seller Sheet Splitter", layout="wide")
-st.title("📦 Seller Data Splitter")
-st.markdown("Provide your master data, select a category, and generate a ZIP folder of individual seller sheets.")
+st.set_page_config(page_title="Seller Data Splitter", layout="wide")
+st.title("📦 Seller Data Splitter & Summarizer")
+st.markdown("Process master data, calculate summaries, and generate individual seller sheets.")
 
-# --- 2. Define our Required Columns ---
+# --- 2. Define Required Columns ---
 REQUIRED_COLS = [
     'sku', 'Title', 'Category', 'Live_flag', 
     'SOH_Total', 'Replenishment Qty', 'Sellers', 'DRR'
 ]
 
 OUTPUT_COLS_SELLER = ['sku', 'Title', 'Live_flag', 'SOH_Total', 'Replenishment Qty', 'Daily Run Rate']
-OUTPUT_COLS_ALL = OUTPUT_COLS_SELLER + ['Sellers']
+OUTPUT_COLS_ALL = OUTPUT_COLS_SELLER + ['Sellers', 'Category']
 
 # Helper functions
 def clean_filename(name):
@@ -66,7 +66,6 @@ elif input_method == "Paste Google Sheet Link":
 
 # --- 4. Processing the Data ---
 if df is not None:
-    # Validation
     missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
     
     if missing_cols:
@@ -74,71 +73,125 @@ if df is not None:
     else:
         st.success("Data loaded successfully!")
         
-        # Rename the DRR column to Daily Run Rate
+        # Rename DRR
         df.rename(columns={'DRR': 'Daily Run Rate'}, inplace=True)
         
-        # --- 5. Category Selection ---
-        categories = df['Category'].dropna().unique().tolist()
-        selected_category = st.selectbox("Select a Category to process:", options=categories)
+        # --- 5. UI Options ---
+        col1, col2 = st.columns(2)
         
-        if st.button("Process Data & Create Folder"):
-            with st.spinner('Generating files and zipping folder...'):
-                filtered_df = df[df['Category'] == selected_category].copy()
+        with col1:
+            categories = ["All Categories"] + df['Category'].dropna().unique().tolist()
+            selected_category = st.selectbox("Select a Category to process:", options=categories)
+            
+        with col2:
+            output_type = st.radio(
+                "Select Output Type:", 
+                ["Full Processing (Master File + Individual Seller Sheets)", "Summary Only (Single Excel File)"]
+            )
+        
+        if st.button("Generate Files"):
+            with st.spinner('Processing data...'):
+                
+                # Filter data based on category selection
+                if selected_category == "All Categories":
+                    filtered_df = df.copy()
+                    safe_category = "All_Categories"
+                else:
+                    filtered_df = df[df['Category'] == selected_category].copy()
+                    safe_category = clean_filename(selected_category)
                 
                 current_date = datetime.now().strftime("%d-%m")
-                safe_category = clean_filename(selected_category)
                 folder_name = f"{safe_category} replenishment _ {current_date}"
                 
-                zip_buffer = io.BytesIO()
+                # --- EXPLODE SELLERS ---
+                exploded_df = filtered_df.copy()
+                exploded_df['Sellers'] = exploded_df['Sellers'].astype(str)
+                exploded_df['Sellers'] = exploded_df['Sellers'].str.replace(r'[\n|;/،]', ',', regex=True)
+                exploded_df['Sellers'] = exploded_df['Sellers'].str.split(',')
+                exploded_df = exploded_df.explode('Sellers')
+                exploded_df['Sellers'] = exploded_df['Sellers'].str.strip()
+                exploded_df = exploded_df[exploded_df['Sellers'] != ""]
+                exploded_df = exploded_df[exploded_df['Sellers'].str.lower() != "nan"]
                 
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                    
-                    # 1. EXPLODE sellers (The exact string-splitting fix)
-                    exploded_df = filtered_df.copy()
-                    
-                    # Force the column to be read as text
-                    exploded_df['Sellers'] = exploded_df['Sellers'].astype(str)
-                    
-                    # Catch weird delimiters and turn them into standard commas just in case
-                    exploded_df['Sellers'] = exploded_df['Sellers'].str.replace(r'[\n|;/،]', ',', regex=True)
-                    
-                    # Cut the string into a list everywhere there is a comma
-                    exploded_df['Sellers'] = exploded_df['Sellers'].str.split(',')
-                    
-                    # Expand that list so every seller gets their own row with the SKU
-                    exploded_df = exploded_df.explode('Sellers')
-                    
-                    # Shave off extra spaces (turns " Lwazem" into "Lwazem")
-                    exploded_df['Sellers'] = exploded_df['Sellers'].str.strip()
-                    
-                    # Clean out any empty ghost rows
-                    exploded_df = exploded_df[exploded_df['Sellers'] != ""]
-                    exploded_df = exploded_df[exploded_df['Sellers'].str.lower() != "nan"]
-
-                    # 2. Write the "Whole Category" Sheet
-                    cat_file_name = f"{safe_category} Replenishment {current_date}.xlsx"
-                    cat_buffer = io.BytesIO() 
-                    exploded_df[OUTPUT_COLS_ALL].to_excel(cat_buffer, index=False)
-                    zip_file.writestr(f"{folder_name}/{cat_file_name}", cat_buffer.getvalue())
-                    
-                    # 3. Create Individual Seller Sheets
-                    unique_sellers = exploded_df['Sellers'].unique()
-                    
-                    for seller in unique_sellers:
-                        seller_df = exploded_df[exploded_df['Sellers'] == seller]
-                        safe_seller = clean_filename(seller)
-                        
-                        seller_file_name = f"{safe_seller} replenishment_{current_date}.xlsx"
-                        seller_buffer = io.BytesIO()
-                        
-                        seller_df[OUTPUT_COLS_SELLER].to_excel(seller_buffer, index=False)
-                        zip_file.writestr(f"{folder_name}/{seller_file_name}", seller_buffer.getvalue())
+                # --- CREATE SUMMARY DATA (UPDATED LOGIC) ---
+                # Ensure math columns are numeric
+                for col in ['SOH_Total', 'Replenishment Qty']:
+                    exploded_df[col] = pd.to_numeric(exploded_df[col], errors='coerce').fillna(0)
                 
-                # --- 6. Download Button ---
-                st.success("Folder generated! Click below to download your ZIP file.")
-                st.download_button(
-                    label="📥 Download ZIP Folder",
-                    data=zip_buffer.getvalue(),
-                    file_name=f"{folder_name}.zip",
-                    mime="application/zip"
-                )
+                # Decide how to group based on user selection
+                groupby_cols = ['Sellers', 'Category'] if selected_category == "All Categories" else ['Sellers']
+                
+                # 1. Base Summary (SKUs, SOH, Replenishment)
+                base_summary = exploded_df.groupby(groupby_cols).agg(
+                    Total_SKUs=('sku', 'count'),
+                    Total_SOH=('SOH_Total', 'sum'),
+                    Total_Replenishment=('Replenishment Qty', 'sum')
+                ).reset_index()
+                
+                # 2. Live Flag Breakdown (Pivot Table)
+                live_flag_summary = pd.pivot_table(
+                    exploded_df,
+                    index=groupby_cols,
+                    columns='Live_flag',
+                    values='sku',
+                    aggfunc='count',
+                    fill_value=0
+                ).reset_index()
+                
+                # Remove the generic column index name to keep headers clean
+                live_flag_summary.columns.name = None
+                
+                # 3. Merge them together into one master summary table
+                summary_df = pd.merge(base_summary, live_flag_summary, on=groupby_cols, how='left')
+                
+                # --- OUTPUT GENERATION ---
+                
+                # OPTION 1: SUMMARY ONLY
+                if output_type == "Summary Only (Single Excel File)":
+                    excel_buffer = io.BytesIO()
+                    summary_df.to_excel(excel_buffer, index=False, sheet_name="Summary")
+                    
+                    st.success("Summary generated successfully!")
+                    st.download_button(
+                        label="📥 Download Summary File",
+                        data=excel_buffer.getvalue(),
+                        file_name=f"{safe_category}_Summary_{current_date}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                
+                # OPTION 2: FULL PROCESSING (ZIP FOLDER)
+                else:
+                    zip_buffer = io.BytesIO()
+                    
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        
+                        # 1. Master File (Data + Summary Tabs)
+                        master_file_name = f"{safe_category} Master {current_date}.xlsx"
+                        master_buffer = io.BytesIO() 
+                        
+                        with pd.ExcelWriter(master_buffer, engine='xlsxwriter') as writer:
+                            exploded_df[OUTPUT_COLS_ALL].to_excel(writer, index=False, sheet_name='Master Data')
+                            summary_df.to_excel(writer, index=False, sheet_name='Summary')
+                            
+                        zip_file.writestr(f"{folder_name}/{master_file_name}", master_buffer.getvalue())
+                        
+                        # 2. Individual Seller Sheets
+                        unique_sellers = exploded_df['Sellers'].unique()
+                        
+                        for seller in unique_sellers:
+                            seller_df = exploded_df[exploded_df['Sellers'] == seller]
+                            safe_seller = clean_filename(seller)
+                            
+                            seller_file_name = f"{safe_seller} replenishment_{current_date}.xlsx"
+                            seller_buffer = io.BytesIO()
+                            
+                            seller_df[OUTPUT_COLS_SELLER].to_excel(seller_buffer, index=False)
+                            zip_file.writestr(f"{folder_name}/{seller_file_name}", seller_buffer.getvalue())
+                    
+                    st.success("Full folder generated! Click below to download your ZIP file.")
+                    st.download_button(
+                        label="📥 Download ZIP Folder",
+                        data=zip_buffer.getvalue(),
+                        file_name=f"{folder_name}.zip",
+                        mime="application/zip"
+                    )
