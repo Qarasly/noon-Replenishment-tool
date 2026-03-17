@@ -24,7 +24,6 @@ def clean_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", str(name))
 
 def get_csv_url(url):
-    """Converts a standard Google Sheets URL into a direct CSV download URL."""
     try:
         if "export?format=csv" in url:
             return url
@@ -84,47 +83,48 @@ if df is not None:
         
         if st.button("Process Data & Create Folder"):
             with st.spinner('Generating files and zipping folder...'):
-                # Filter data for the Whole Category sheet (keeps original comma-separated sellers)
                 filtered_df = df[df['Category'] == selected_category].copy()
                 
-                # Get today's date formatted as DD-MM
                 current_date = datetime.now().strftime("%d-%m")
-                
-                # Define the main folder name
                 safe_category = clean_filename(selected_category)
                 folder_name = f"{safe_category} replenishment _ {current_date}"
                 
-                # Create an in-memory ZIP file
                 zip_buffer = io.BytesIO()
                 
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                     
-                    # 1. Create and write the "Whole Category" sheet FIRST (un-exploded)
-                    cat_file_name = f"{safe_category} Replenishment {current_date}.xlsx"
-                    cat_buffer = io.BytesIO() 
-                    
-                    filtered_df[OUTPUT_COLS_ALL].to_excel(cat_buffer, index=False)
-                    zip_file.writestr(f"{folder_name}/{cat_file_name}", cat_buffer.getvalue())
-                    
-                    # 2. EXPLODE the sellers for individual sheets
-                    # We copy the dataframe, split the strings by comma, and explode it into new rows
+                    # 1. EXPLODE sellers (The exact string-splitting fix)
                     exploded_df = filtered_df.copy()
                     
-                    # Convert to string to avoid errors, split by comma, then explode
-                    exploded_df['Sellers'] = exploded_df['Sellers'].astype(str).str.split(',')
+                    # Force the column to be read as text
+                    exploded_df['Sellers'] = exploded_df['Sellers'].astype(str)
+                    
+                    # Catch weird delimiters and turn them into standard commas just in case
+                    exploded_df['Sellers'] = exploded_df['Sellers'].str.replace(r'[\n|;/،]', ',', regex=True)
+                    
+                    # Cut the string into a list everywhere there is a comma
+                    exploded_df['Sellers'] = exploded_df['Sellers'].str.split(',')
+                    
+                    # Expand that list so every seller gets their own row with the SKU
                     exploded_df = exploded_df.explode('Sellers')
                     
-                    # Strip out any extra blank spaces (e.g., "Seller A, Seller B" -> " Seller B" becomes "Seller B")
+                    # Shave off extra spaces (turns " Lwazem" into "Lwazem")
                     exploded_df['Sellers'] = exploded_df['Sellers'].str.strip()
                     
-                    # Loop through our newly separated unique sellers
-                    unique_sellers = exploded_df['Sellers'].dropna().unique()
+                    # Clean out any empty ghost rows
+                    exploded_df = exploded_df[exploded_df['Sellers'] != ""]
+                    exploded_df = exploded_df[exploded_df['Sellers'].str.lower() != "nan"]
+
+                    # 2. Write the "Whole Category" Sheet
+                    cat_file_name = f"{safe_category} Replenishment {current_date}.xlsx"
+                    cat_buffer = io.BytesIO() 
+                    exploded_df[OUTPUT_COLS_ALL].to_excel(cat_buffer, index=False)
+                    zip_file.writestr(f"{folder_name}/{cat_file_name}", cat_buffer.getvalue())
+                    
+                    # 3. Create Individual Seller Sheets
+                    unique_sellers = exploded_df['Sellers'].unique()
                     
                     for seller in unique_sellers:
-                        # Ignore rows where the seller might be 'nan' or empty after splitting
-                        if seller.lower() == 'nan' or seller == "":
-                            continue
-                            
                         seller_df = exploded_df[exploded_df['Sellers'] == seller]
                         safe_seller = clean_filename(seller)
                         
