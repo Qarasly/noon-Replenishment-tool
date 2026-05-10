@@ -11,13 +11,20 @@ st.title("📦 Noon Replenishment Tool")
 st.markdown("Process master data, calculate summaries, and generate individual seller sheets.")
 
 # --- 2. Define Required Columns ---
+# These are the exact headers expected from your source sheet
+EXPECTED_SHEET_COLS = [
+    'sku', 'title_en', 'comcat_code', 'max_live_check_overall', 
+    'Stocks_updated', 'Replenishment Qty', 'partner_name', 'DRR_L60D'
+]
+
+# Internal required columns used by the processing logic
 REQUIRED_COLS = [
     'sku', 'Title', 'Category', 'Live_flag', 
     'SOH_Total', 'Replenishment Qty', 'Sellers', 'DRR'
 ]
 
-st.info(f"**📋 Required Columns:** Your uploaded file or Google Sheet must contain the following exact headers (capitalization doesn't matter): \n\n"
-        f"`{ '`, `'.join(REQUIRED_COLS) }`")
+st.info(f"**📋 Expected Columns:** Your uploaded file or Google Sheet must contain the following exact headers (capitalization doesn't matter): \n\n"
+        f"`{ '`, `'.join(EXPECTED_SHEET_COLS) }`")
 
 OUTPUT_COLS_SELLER = ['sku', 'Title', 'Live_flag', 'SOH_Total', 'Replenishment Qty', 'Daily Run Rate']
 OUTPUT_COLS_ALL = OUTPUT_COLS_SELLER + ['Sellers', 'Category']
@@ -78,16 +85,16 @@ if df is not None:
         clean_headers.append(col_str)
     df.columns = clean_headers
     
-    # 2. Map whatever capitalization they used to the exact format our code needs
+    # 2. Map your sheet's specific column names to the exact internal format our code needs
     rename_map = {
         'sku': 'sku',
-        'title': 'Title',
-        'category': 'Category',
-        'live_flag': 'Live_flag',
-        'soh_total': 'SOH_Total',
+        'title_en': 'Title',
+        'comcat_code': 'Category',
+        'max_live_check_overall': 'Live_flag',
+        'stocks_updated': 'SOH_Total',
         'replenishment qty': 'Replenishment Qty',
-        'sellers': 'Sellers',
-        'drr': 'DRR'
+        'partner_name': 'Sellers',
+        'drr_l60d': 'DRR'
     }
     
     # Apply the renaming instantly
@@ -97,7 +104,10 @@ if df is not None:
     missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
     
     if missing_cols:
-        st.error(f"⚠️ **Error:** The data is missing the following required columns: {', '.join(missing_cols)}")
+        # Reverse map to show the user which original sheet column is missing
+        reverse_map = {v: k for k, v in rename_map.items()}
+        missing_original = [reverse_map.get(col, col) for col in missing_cols]
+        st.error(f"⚠️ **Error:** The data is missing the following required headers: {', '.join(missing_original)}")
         st.info(f"🔍 **Debugging Help - Here are the headers Python actually found in your file:**\n\n`{ '`, `'.join(df.columns) }`")
     else:
         st.success("Data loaded successfully!")
